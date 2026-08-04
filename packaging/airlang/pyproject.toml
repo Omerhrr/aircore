@@ -8,7 +8,9 @@ description = "airlang: the AirLang declarative workflow language frontend -- le
 readme = "README.md"
 requires-python = ">=3.9"
 dynamic = ["version"]
-dependencies = ["airpy"]
+# Dependency is on airpy's PyPI distribution name (airpyy), not its
+# import name -- pip resolves dependencies by distribution name.
+dependencies = ["airpyy"]
 
 [project.urls]
 Homepage = "https://github.com/Omerhrr/aircore"

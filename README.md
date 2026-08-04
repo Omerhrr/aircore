@@ -29,16 +29,23 @@ aircore   <-  airpy   <-  airlang
 
 ## Install
 
+`airpy`'s and `aircli`'s PyPI distribution names differ from their
+import names -- `airpy`/`aircli` were both too close to existing PyPI
+project names and got rejected, so they're published as `airpyy` /
+`airclii`. You still `import airpy` and run the `ai` command exactly as
+before; only the `pip install` name changes.
+
 ```
-pip install aircore          # just the runtime
-pip install airpy             # runtime + SDK
+pip install aircore           # just the runtime
+pip install airpyy            # runtime + SDK           (import as: airpy)
 pip install airlang           # runtime + SDK + language frontend
-pip install aircli             # everything, plus the `ai` command
+pip install airclii           # everything, plus the `ai` command
 ```
 
 Optional extras on `airpy`: `litellm`, `pydantic`, `mcp`, `openai` --
 each is a lazy import inside the one module that needs it, so none of
-them are required just to install `airpy` itself.
+them are required just to install `airpy` itself. (`pip install
+"airpyy[litellm]"` etc.)
 
 For local development on this repo (all four packages, editable,
 `pip install -e .` style), see the root `pyproject.toml` instead of the
