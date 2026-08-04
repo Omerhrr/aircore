@@ -1,0 +1,45 @@
+# AirLang-M3 acceptance example: `if confidence < X { Reviewer }` right after
+# a `consensus judge { confidence true }` block now actually runs -- it
+# compiles to aircore's confidence-gated consensus fallback (see
+# aircore/consensus.py's `fallback`/`fallback_below`), not general
+# branching. Uses `provider mock`, so MockProvider's response drives
+# whether the fallback triggers -- see research_with_fallback.airlang.py's
+# PROVIDERS binding, which scripts a deliberately low-confidence judge
+# verdict so `Reviewer` runs. Swap the bindings file for a real provider
+# to see this decided by an actual model instead.
+#
+# Run with: ai run examples/research_with_fallback.airlang
+#           ai trace examples/research_with_fallback.airlang --html
+
+provider mock
+
+agent Literature {
+    provider mock
+}
+
+agent Reddit {
+    provider mock
+}
+
+agent Reviewer {
+    provider mock
+}
+
+workflow ResearchWithReview {
+    parallel {
+        Literature
+        Reddit
+    }
+
+    consensus {
+        strategy judge
+        mode select
+        confidence true
+    }
+
+    if confidence < 0.85 {
+        Reviewer
+    }
+
+    artifact Report
+}

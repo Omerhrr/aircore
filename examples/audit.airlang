@@ -1,0 +1,75 @@
+# AirLang-M0 acceptance example -- the exact "Audit" workflow from
+# airlang-spec-v1.md sections 4 and 8. This parses cleanly (python -m airlang
+# parse examples/audit.airlang --ir) but does NOT run yet -- there is no
+# executor until AirLang-M1, and this file's `if` block is flagged in
+# airlang-spec-v1.md section 5.1 as not backed by any runtime primitive yet.
+
+import github
+
+tool clone_repo
+tool search_docs
+
+capability Network
+capability Filesystem
+
+provider deepseek
+
+agent Researcher {
+    provider deepseek
+    model deepseek-chat
+
+    capabilities {
+        Network
+        Filesystem
+    }
+
+    tools {
+        clone_repo
+        search_docs
+    }
+}
+
+agent BusinessLogic {
+    provider deepseek
+    model deepseek-chat
+}
+
+agent InvariantChecker {
+    provider deepseek
+    model deepseek-chat
+}
+
+agent HumanReviewer {
+    provider deepseek
+    model deepseek-chat
+}
+
+policy {
+    max_cost $2
+    max_parallel 8
+    timeout 5m
+}
+
+workflow Audit {
+    step clone_repo
+
+    parallel {
+        Researcher
+        BusinessLogic
+        InvariantChecker
+    }
+
+    consensus {
+        strategy judge
+        mode synthesize
+        confidence true
+    }
+
+    if confidence < 0.85 {
+        HumanReviewer
+    }
+
+    artifact AuditReport {
+        type markdown
+    }
+}

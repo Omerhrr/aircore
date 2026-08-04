@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aircli"
+description = "aircli: the `ai` command -- ai run/trace for .py scripts and .airlang files, --json/--html trace output. Depends on aircore, airpy, and airlang since it drives all three from one CLI surface."
+readme = "README.md"
+requires-python = ">=3.9"
+dynamic = ["version"]
+dependencies = ["aircore", "airpy", "airlang"]
+
+[project.urls]
+Homepage = "https://github.com/Omerhrr/aircore"
+Source = "https://github.com/Omerhrr/aircore"
+
+[project.scripts]
+# The command is `ai`, not `aircli` -- unchanged by the package rename,
+# see pyproject.toml (root, dev install) for why.
+ai = "aircli.__main__:main"
+
+[tool.setuptools]
+packages = ["aircli"]
+
+[tool.setuptools.dynamic]
+version = { attr = "aircli.__version__" }

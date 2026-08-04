@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+dist-stage/
+*.whl
+
+# Test/tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Generated example output -- reproducible by re-running the example,
+# not source. Checkpoint files in particular can contain real (if mock)
+# run state that's noise in version control.
+examples/*.trace.html
+examples/production_readiness_checkpoint.json
+
+# Secrets -- never commit an API key. Every live example reads its key
+# from an environment variable (DEEPSEEK_API_KEY etc.), never a file, but
+# .env is excluded defensively in case that convention is ever used.
+.env

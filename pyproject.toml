@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aircore-project"
+version = "0.1.0"
+description = "aircore: a provider-agnostic execution runtime (scheduler, capabilities, policy, journal, consensus, memory, approval, checkpoint/resume, sandboxed execution, cross-step data flow). airpy: the provider-aware SDK layer on top of it. aircli: a minimal CLI (ai run/trace, .py and .airlang). airlang: the AirLang language frontend -- lexer/parser/IR plus an executor (airlang/executor.py) that runs .airlang files via airpy -- see airlang-spec-v1.md."
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+# airpy lazily imports litellm (see airpy/litellm_provider.py) -- it's
+# only required if you actually construct a LiteLLMProvider. MockProvider
+# needs nothing beyond this package.
+litellm = ["litellm>=1.0"]
+# Same lazy-dependency pattern: only required if you pass a Pydantic
+# BaseModel subclass as output_schema= (see airpy/structured_output.py).
+# A plain JSON-schema dict needs no extra dependency at all.
+pydantic = ["pydantic>=2.0"]
+# Same lazy-dependency pattern again: only required if you construct a
+# StdioMCPClient (see airpy/mcp_tools.py). tools_from_mcp() itself and
+# MockMCPClient need nothing beyond this package.
+mcp = ["mcp>=1.0"]
+# Same lazy-dependency pattern: only required if you construct an
+# OpenAIProvider (see airpy/openai_provider.py). This was missing from
+# this list when OpenAIProvider first shipped -- added now for
+# consistency with the other three lazy extras.
+openai = ["openai>=1.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+# `ai run`/`ai trace` accept both .py scripts and .airlang files (AirLang-M2) --
+# see aircli/__main__.py. The command is still typed `ai`, unchanged by the
+# aicli -> aircli package rename -- only the module path underneath moved.
+ai = "aircli.__main__:main"
+# `ail parse file.airlang --ir` inspects the IR a .airlang file parses to. The
+# actual executor (AirLang-M1, airlang/executor.py) is driven through `ai run`/
+# `ai trace` above, not this command -- see airlang/__main__.py's docstring.
+# The command is still typed `ail`, unchanged by the ail -> airlang package
+# rename -- only the module path underneath moved.
+ail = "airlang.__main__:main"
+
+[tool.setuptools]
+packages = ["aircore", "airpy", "aircli", "airlang"]

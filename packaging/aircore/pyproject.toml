@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aircore"
+description = "aircore: a provider-agnostic execution runtime -- scheduler, capabilities, policy, journal, consensus, memory, approval, checkpoint/resume, sandboxed execution, cross-step data flow. No model, prompt, or provider concept exists anywhere in this package, by design -- see aircore/__init__.py."
+readme = "README.md"
+requires-python = ">=3.9"
+dynamic = ["version"]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Omerhrr/aircore"
+Source = "https://github.com/Omerhrr/aircore"
+
+[tool.setuptools]
+packages = ["aircore"]
+
+[tool.setuptools.dynamic]
+# Single source of truth for the version: aircore/__init__.py's own
+# __version__, not a second number hand-kept here that could drift from
+# it. See .github/workflows/publish.yml's docstring for how this
+# staging directory is assembled at publish time.
+version = { attr = "aircore.__version__" }

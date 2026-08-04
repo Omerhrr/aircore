@@ -1,0 +1,35 @@
+# AirLang-M3.2 acceptance example: `let report = artifact Findings` now
+# actually wires Researcher's real output into Critic's prompt, via
+# airlang/executor.py's producer-linkage + PromptTemplate compilation (closes
+# airlang-spec-v1.md section 5.4's `let` gap). `artifact Findings` right after
+# `step Researcher` marks Researcher as Findings' producer; `let report =
+# artifact Findings` aliases that binding to `report`; Critic's prompt
+# `"Critique this finding: {report}"` resolves `{report}` from
+# workflow.bindings at execute() time, same mechanism as hand-written
+# airpy code using PromptTemplate(prompt_bindings=...) directly.
+#
+# Uses `provider mock`, so this runs offline with no API key -- see
+# research_with_binding.airlang.py's PROVIDERS binding for what each agent
+# actually says. Swap in a real provider (e.g. `deepseek`) to see a real
+# model's finding flow into a real model's critique.
+#
+# Run with: ai run examples/research_with_binding.airlang
+#           ai trace examples/research_with_binding.airlang --html
+
+provider mock
+
+agent Researcher {
+    provider mock
+}
+
+agent Critic {
+    provider mock
+    prompt "Critique this finding: {report}"
+}
+
+workflow ResearchWithBinding {
+    step Researcher
+    artifact Findings
+    let report = artifact Findings
+    step Critic
+}

@@ -1,0 +1,112 @@
+name: publish
+
+# Builds and publishes all four packages (aircore, airpy, airlang, aircli)
+# to PyPI as independent distributions, using PyPI's "Trusted Publishing"
+# (OIDC) -- no API token stored as a repo secret. This requires a one-time,
+# manual setup on pypi.org for EACH of the four project names before this
+# workflow can publish anything -- see the README-style comment at the
+# bottom of this file for exactly what to do there; nothing here can do
+# that step for you.
+#
+# Trigger: publishing a GitHub Release (the normal path -- tag it, write
+# release notes, hit publish, this workflow does the rest), or manually via
+# workflow_dispatch if you need to re-run it (e.g. after fixing a trusted-
+# publisher config) without cutting a new release.
+#
+# Each package keeps its own version, read directly from its own
+# `<package>/__init__.py`'s `__version__` (see packaging/<package>/
+# pyproject.toml's `[tool.setuptools.dynamic]` -- one source of truth, not
+# a second number to remember to bump here). Publishing a version that's
+# already live on PyPI for that package is a no-op (`skip-existing: true`)
+# rather than a failed job -- normal for a monorepo release where not
+# every package changed since the last one.
+#
+# What actually gets uploaded is NOT this repo's flat layout as-is: for
+# each package, the `stage` step assembles a clean, minimal build
+# directory containing only that one package's source, the shared
+# README.md/LICENSE, and that package's own packaging/<package>/
+# pyproject.toml (copied in as `pyproject.toml`). This keeps the existing,
+# already-tested flat repo layout (aircore/, airpy/, airlang/, aircli/,
+# tests/, examples/ all at the root) completely untouched -- nothing about
+# local development or `pip install -e .` changes because of this.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    uses: ./.github/workflows/tests.yml
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      # fail-fast: false -- one package's publish failing (e.g. a trusted
+      # publisher misconfigured for just that project) shouldn't block the
+      # other three from going out.
+      fail-fast: false
+      matrix:
+        package: [aircore, airpy, airlang, aircli]
+    environment:
+      # Matches the "Environment name" you set when configuring each
+      # project's trusted publisher on PyPI -- see the setup notes below.
+      # One environment per package, so a compromised/misconfigured
+      # publisher for one package can't be used to publish the others.
+      name: pypi-${{ matrix.package }}
+    permissions:
+      # Required for PyPI Trusted Publishing (OIDC) -- this is what lets
+      # gh-action-pypi-publish authenticate with no stored token at all.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Stage ${{ matrix.package }} into an isolated build directory
+        run: |
+          set -eu
+          STAGE="dist-stage/${{ matrix.package }}"
+          mkdir -p "$STAGE"
+          cp -r "${{ matrix.package }}" "$STAGE/${{ matrix.package }}"
+          cp "packaging/${{ matrix.package }}/pyproject.toml" "$STAGE/pyproject.toml"
+          cp README.md "$STAGE/README.md"
+          cp LICENSE "$STAGE/LICENSE"
+
+      - name: Install build tool
+        run: pip install build
+
+      - name: Build sdist + wheel
+        run: python -m build "dist-stage/${{ matrix.package }}"
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-stage/${{ matrix.package }}/dist
+          skip-existing: true
+
+# --- One-time setup this workflow depends on, done by you on pypi.org ---
+#
+# For EACH of the four project names (aircore, airpy, airlang, aircli):
+#   1. If the project doesn't exist on PyPI yet: go to
+#      https://pypi.org/manage/account/publishing/ and add a "pending"
+#      trusted publisher -- Owner/repo = your GitHub org/repo, Workflow
+#      filename = publish.yml, Environment name = pypi-<package> (must
+#      match the `environment.name` above exactly, e.g. pypi-aircore).
+#      PyPI creates the project automatically the first time this
+#      workflow successfully publishes it.
+#   2. If the project already exists: go to that project's page -> Manage
+#      -> Publishing, and add the same trusted publisher there instead.
+#   3. In this GitHub repo's Settings -> Environments, create the four
+#      matching environments (pypi-aircore, pypi-airpy, pypi-airlang,
+#      pypi-aircli) -- optionally with a required-reviewers protection
+#      rule if you want a manual approval step before anything actually
+#      publishes.
+#
+# Also, before the first real release: replace the placeholder GitHub URL
+# in each packaging/<package>/pyproject.toml's [project.urls] section --
+# left as REPLACE_WITH_YOUR_GITHUB_USER/REPLACE_WITH_YOUR_REPO since I
+# don't know where you're pushing this yet.

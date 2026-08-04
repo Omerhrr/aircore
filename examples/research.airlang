@@ -1,0 +1,33 @@
+# AirLang-M1/M2 acceptance example -- unlike examples/audit.airlang (parse-only,
+# its `if` block isn't executable yet -- see airlang-spec-v1.md section 5),
+# this workflow uses only the non-blocked AirLang-M1 subset, so it actually
+# runs end to end via `ai run examples/research.airlang` / `ai trace
+# examples/research.airlang --html`. Uses `provider mock` throughout (no API
+# key, no network, no bindings file needed) -- swap `mock` for a real
+# provider catalog name (deepseek, anthropic, ...) to run it for real.
+
+provider mock
+
+agent Literature {
+    provider mock
+}
+
+agent Reddit {
+    provider mock
+}
+
+agent GitHub {
+    provider mock
+}
+
+workflow Research {
+    parallel {
+        Literature
+        Reddit
+        GitHub
+    }
+
+    consensus majority
+
+    artifact Report
+}

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "airpy"
+description = "airpy: the provider-aware Python SDK layer on top of aircore -- ModelAgent, providers (MockProvider, LiteLLMProvider, native OpenAIProvider), consensus strategies, structured output, MCP tool registry, streaming, sessions, PromptTemplate. Imports aircore; aircore never imports this package."
+readme = "README.md"
+requires-python = ">=3.9"
+dynamic = ["version"]
+dependencies = ["aircore"]
+
+[project.optional-dependencies]
+# Each of these is a lazy import inside the one module that needs it --
+# airpy itself has no hard dependency on any of them. See the relevant
+# module's own docstring (litellm_provider.py, structured_output.py,
+# mcp_tools.py, openai_provider.py) for exactly what's lazy and why.
+litellm = ["litellm>=1.0"]
+pydantic = ["pydantic>=2.0"]
+mcp = ["mcp>=1.0"]
+openai = ["openai>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/Omerhrr/aircore"
+Source = "https://github.com/Omerhrr/aircore"
+
+[tool.setuptools]
+packages = ["airpy"]
+
+[tool.setuptools.dynamic]
+version = { attr = "airpy.__version__" }
