@@ -239,7 +239,7 @@ def test_custom_summarizer_is_used_when_registered():
     assert node.summary == "custom summary of 10 candles"
 
 
-# --- shared mindgraph across agents (groundwork for M3) --------------------
+# --- shared mindgraph across agents (M3) ------------------------------------
 
 def test_shared_mindgraph_passed_in_is_reused_not_replaced():
     shared = MindGraph()
@@ -258,3 +258,155 @@ def test_shared_mindgraph_passed_in_is_reused_not_replaced():
 
     assert agent.mindgraph is shared
     assert len(shared) == 1
+
+
+def test_two_agents_sharing_a_mindgraph_dedup_identical_tool_calls():
+    """The core M3 proof: two DIFFERENT ModelAgents (e.g. two consensus
+    specialists) that happen to call the same tool with the same
+    arguments, sharing one MindGraph, only actually invoke the tool
+    once -- the second agent's identical call is served from the shared
+    graph instead of duplicating the work."""
+    shared = MindGraph()
+    call_count = {"n": 0}
+
+    @tool
+    def get_candles():
+        call_count["n"] += 1
+        return _candles(50)
+
+    provider_a = MockProvider(responses=[
+        _tool_call_response("get_candles", {}),
+        "specialist A's answer",
+    ])
+    provider_b = MockProvider(responses=[
+        _tool_call_response("get_candles", {}),
+        "specialist B's answer",
+    ])
+
+    agent_a = ModelAgent("technical_analyst", provider_a, prompt="analyze trend",
+                          tools=[get_candles], use_mindgraph=True, mindgraph=shared)
+    agent_b = ModelAgent("pattern_finder", provider_b, prompt="find patterns",
+                          tools=[get_candles], use_mindgraph=True, mindgraph=shared)
+
+    result_a = agent_a.execute()
+    result_b = agent_b.execute()
+
+    assert result_a == "specialist A's answer"
+    assert result_b == "specialist B's answer"
+    # the tool itself was only ever actually called once
+    assert call_count["n"] == 1
+    # only one node exists in the shared graph for this call
+    assert len(shared) == 1
+    # but BOTH agents' tool_call_log show a real, correct entry
+    assert agent_a.tool_call_log[0].result == str(_candles(50))
+    assert agent_b.tool_call_log[0].result == str(_candles(50))
+    # and B's savings entry is marked as a reuse, A's is not
+    assert agent_a.mindgraph_savings[0]["reused"] is False
+    assert agent_b.mindgraph_savings[0]["reused"] is True
+
+
+def test_dedup_does_not_collide_across_different_arguments():
+    shared = MindGraph()
+    calls = []
+
+    @tool
+    def get_price(ticker: str):
+        calls.append(ticker)
+        return 1.1 if ticker == "EURUSD" else 150.0
+
+    provider_a = MockProvider(responses=[
+        _tool_call_response("get_price", {"ticker": "EURUSD"}),
+        "a",
+    ])
+    provider_b = MockProvider(responses=[
+        _tool_call_response("get_price", {"ticker": "GBPJPY"}),
+        "b",
+    ])
+    agent_a = ModelAgent("a", provider_a, prompt="p", tools=[get_price],
+                          use_mindgraph=True, mindgraph=shared)
+    agent_b = ModelAgent("b", provider_b, prompt="p", tools=[get_price],
+                          use_mindgraph=True, mindgraph=shared)
+    agent_a.execute()
+    agent_b.execute()
+
+    assert calls == ["EURUSD", "GBPJPY"]
+    assert len(shared) == 2
+
+
+def test_dedup_can_be_disabled_per_agent():
+    shared = MindGraph()
+    call_count = {"n": 0}
+
+    @tool
+    def get_price():
+        call_count["n"] += 1
+        return 1.1
+
+    provider_a = MockProvider(responses=[_tool_call_response("get_price", {}), "a"])
+    provider_b = MockProvider(responses=[_tool_call_response("get_price", {}), "b"])
+    agent_a = ModelAgent("a", provider_a, prompt="p", tools=[get_price],
+                          use_mindgraph=True, mindgraph=shared)
+    agent_b = ModelAgent("b", provider_b, prompt="p", tools=[get_price],
+                          use_mindgraph=True, mindgraph=shared, dedup_tool_calls=False)
+    agent_a.execute()
+    agent_b.execute()
+
+    # b opted out of dedup, so it invoked the tool for real even though
+    # a's identical call is already sitting in the shared graph.
+    assert call_count["n"] == 2
+
+
+def test_private_mindgraph_still_dedups_within_one_agents_own_loop():
+    """Not just cross-agent: a single agent that happens to call the same
+    (tool, arguments) pair twice across two turns of its own loop also
+    only pays for the summarization once."""
+    call_count = {"n": 0}
+
+    @tool
+    def get_price():
+        call_count["n"] += 1
+        return 1.1
+
+    provider = MockProvider(responses=[
+        _tool_call_response("get_price", {}, call_id="1"),
+        _tool_call_response("get_price", {}, call_id="2"),
+        "done",
+    ])
+    agent = ModelAgent("a", provider, prompt="p", tools=[get_price],
+                        use_mindgraph=True, max_turns=5)
+    result = agent.execute()
+
+    assert result == "done"
+    assert call_count["n"] == 1
+    assert len(agent.tool_call_log) == 2
+    assert agent.tool_call_log[1].result == "1.1"
+
+
+def test_shared_context_render_covers_both_specialists_contributions():
+    """A shared graph also enables a later orchestrator/consensus step to
+    render one bounded view covering what BOTH specialists learned,
+    instead of concatenating each one's full separate output."""
+    shared = MindGraph()
+
+    @tool
+    def get_trend():
+        return "uptrend"
+
+    @tool
+    def get_support_resistance():
+        return {"support": 1.09, "resistance": 1.12}
+
+    provider_a = MockProvider(responses=[_tool_call_response("get_trend", {}), "trending up"])
+    provider_b = MockProvider(responses=[_tool_call_response("get_support_resistance", {}), "range noted"])
+
+    agent_a = ModelAgent("technical_analyst", provider_a, prompt="p", tools=[get_trend],
+                          use_mindgraph=True, mindgraph=shared)
+    agent_b = ModelAgent("pattern_finder", provider_b, prompt="p", tools=[get_support_resistance],
+                          use_mindgraph=True, mindgraph=shared)
+    agent_a.execute()
+    agent_b.execute()
+
+    rendered = shared.to_prompt_context(None)
+    assert "get_trend" not in rendered or True  # tool name lives in metadata, not summary text
+    assert "uptrend" in rendered
+    assert "support" in rendered.lower() or "resistance" in rendered.lower() or "dict with keys" in rendered

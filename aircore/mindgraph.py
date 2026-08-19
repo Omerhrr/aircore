@@ -109,6 +109,11 @@ class MindGraph:
         self._nodes: Dict[str, Node] = {}
         self._seq = itertools.count(1)
         self._auto_id = itertools.count(1)
+        # dedup_key -> node id. See add_node's `dedup_key` and
+        # get_by_dedup_key -- this is what M3 (shared graphs across
+        # parallel/consensus specialists) uses to recognize "this is the
+        # same call as one already answered" instead of redoing the work.
+        self._dedup_index: Dict[str, str] = {}
 
     def __len__(self) -> int:
         return len(self._nodes)
@@ -124,12 +129,24 @@ class MindGraph:
         metadata: Optional[Dict[str, Any]] = None,
         edges: Optional[Iterable[str]] = None,
         node_id: Optional[str] = None,
+        dedup_key: Optional[str] = None,
     ) -> Node:
         """Create and store a node, returning it. `edges` are the ids of
         nodes this one depends on / was derived from -- validated to
         already exist (a node can't depend on something that isn't in the
         graph yet), same "define before you reference" discipline as
-        Workflow.bindings (see cross-step-data-flow.md)."""
+        Workflow.bindings (see cross-step-data-flow.md).
+
+        `dedup_key`, if given, registers this node under that key (see
+        get_by_dedup_key) -- meant for a caller that wants "the same
+        logical call" (e.g. the same tool name + arguments) to resolve to
+        one node even if it happens more than once, rather than a fresh
+        node each time. add_node() itself does NOT check for an existing
+        key and skip creation -- that policy decision (dedup vs. always
+        create) belongs to the caller; see get_by_dedup_key() for the
+        check-first half of that pattern. A duplicate dedup_key silently
+        overwrites the index entry to point at this newer node -- last
+        write wins, same as a plain dict."""
         edges = list(edges or [])
         for parent_id in edges:
             if parent_id not in self._nodes:
@@ -146,7 +163,20 @@ class MindGraph:
             metadata=dict(metadata or {}), edges=edges, seq=next(self._seq),
         )
         self._nodes[node_id] = node
+        if dedup_key is not None:
+            self._dedup_index[dedup_key] = node_id
         return node
+
+    def get_by_dedup_key(self, dedup_key: str) -> Optional[Node]:
+        """The check-first half of add_node's dedup_key pattern: returns
+        the node already registered under this key, or None if nothing's
+        been added with it yet (or the node it pointed at was later
+        removed -- remove() does not clean up this index, so a stale key
+        after remove() also returns None rather than a dangling id)."""
+        node_id = self._dedup_index.get(dedup_key)
+        if node_id is None or node_id not in self._nodes:
+            return None
+        return self._nodes[node_id]
 
     def get(self, node_id: str) -> Node:
         try:

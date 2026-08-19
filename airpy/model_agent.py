@@ -238,7 +238,8 @@ class ModelAgent(Executable):
                  prompt_bindings: Optional[Dict[str, Any]] = None,
                  use_mindgraph: bool = False,
                  mindgraph: Optional[MindGraph] = None,
-                 summarizers: Optional[Dict[str, Callable[[Any], str]]] = None) -> None:
+                 summarizers: Optional[Dict[str, Callable[[Any], str]]] = None,
+                 dedup_tool_calls: bool = True) -> None:
         # Model calls default to idempotent=True (unlike Tool's
         # idempotent=False default) because a read-only generation call is
         # normally safe to retry on a transient failure -- but this is
@@ -324,6 +325,18 @@ class ModelAgent(Executable):
         self.use_mindgraph = use_mindgraph
         self.mindgraph = mindgraph if mindgraph is not None else MindGraph()
         self.summarizers = dict(summarizers or {})
+        # Only meaningful when use_mindgraph is True. See
+        # _tool_call_dedup_key/_run_tool_calling_loop: a repeat of the
+        # same (tool name, arguments) pair -- from this agent looping
+        # again, or from a DIFFERENT ModelAgent sharing this same
+        # `mindgraph=` (M3's whole point) -- reuses the existing node
+        # instead of re-invoking the tool. True by default because the
+        # common case (read-only analysis/lookup tools) is safe to dedup;
+        # set False for a tools list where identical arguments can
+        # legitimately mean "do it again" (e.g. a tool with real,
+        # non-idempotent side effects, or one whose result changes with
+        # time even for the same arguments -- a live price lookup, say).
+        self.dedup_tool_calls = dedup_tool_calls
         # One entry per tool call made with use_mindgraph=True -- the
         # measured proof that this actually reduces tokens, not just a
         # claim. {"tool": name, "raw_tokens": int, "summary_tokens": int}.
@@ -558,17 +571,47 @@ class ModelAgent(Executable):
             })
 
             for call in response.tool_calls:
-                result_text, error, raw_value = self._invoke_tool(tools_by_name, call.name, call.arguments)
+                cached_node = None
+                if self.use_mindgraph and self.dedup_tool_calls and call.name != "expand_node":
+                    dedup_key = self._tool_call_dedup_key(call.name, call.arguments)
+                    cached_node = self.mindgraph.get_by_dedup_key(dedup_key)
+                else:
+                    dedup_key = None
+
+                if cached_node is not None:
+                    # Same (tool, arguments) pair already answered -- by
+                    # this agent, or (when self.mindgraph is a shared
+                    # graph, see the module docstring's "Token reduction"
+                    # section and the "Shared context" note below) by a
+                    # DIFFERENT ModelAgent sharing this graph, e.g. two
+                    # consensus specialists both asking for the same
+                    # underlying market data. Skip re-invoking the tool
+                    # entirely -- tool_call_log still gets a real entry
+                    # (this call genuinely happened, from the model's
+                    # point of view), just built from the cached node's
+                    # metadata instead of a fresh _invoke_tool() call.
+                    result_text = cached_node.metadata.get("result_text", cached_node.summary)
+                    error = cached_node.metadata.get("error")
+                    message_content = self._node_reference_text(cached_node)
+                    self.mindgraph_savings.append({
+                        "tool": call.name, "raw_tokens": estimate_tokens(result_text),
+                        "summary_tokens": estimate_tokens(message_content), "reused": True,
+                    })
+                else:
+                    result_text, error, raw_value = self._invoke_tool(tools_by_name, call.name, call.arguments)
+                    if self.use_mindgraph and call.name != "expand_node":
+                        message_content = self._mindgraph_tool_message(
+                            call.name, result_text, error, raw_value, dedup_key=dedup_key,
+                        )
+                    else:
+                        message_content = result_text
+
                 # tool_call_log always keeps the real, full result text --
                 # use_mindgraph only changes what gets sent back to the
                 # *model* below, never what's inspectable after the fact.
                 self.tool_call_log.append(ToolCallRecord(
                     name=call.name, arguments=call.arguments, result=result_text, error=error,
                 ))
-                if self.use_mindgraph and call.name != "expand_node":
-                    message_content = self._mindgraph_tool_message(call.name, result_text, error, raw_value)
-                else:
-                    message_content = result_text
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.id,
@@ -609,15 +652,45 @@ class ModelAgent(Executable):
             error = f"{type(exc).__name__}: {exc}"
             return f"Error calling {name}: {error}", error, None
 
-    def _mindgraph_tool_message(self, tool_name: str, result_text: str,
-                                 error: Optional[str], raw_value: Any) -> str:
+    def _tool_call_dedup_key(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+        """A stable key for "this exact tool call" -- name plus a
+        canonical (sorted-key) JSON encoding of its arguments, so
+        argument order never causes a false cache miss. Used to recognize
+        a repeat of the same call, whether it comes from this same agent
+        looping again, or (when self.mindgraph is a graph shared across
+        multiple ModelAgents, see the module docstring's "Shared context"
+        note) a different specialist asking for the same underlying data.
+        Deliberately does NOT include self.name -- the whole point is
+        that two different agents sharing a graph recognize each other's
+        identical calls."""
+        return f"{tool_name}:{json.dumps(arguments, sort_keys=True, default=str)}"
+
+    def _node_reference_text(self, node: Any) -> str:
+        """The text that goes into `messages` in place of a tool's raw
+        result -- shared by both a freshly-summarized node and a
+        dedup-reused one, so a reused call reads identically to the model
+        as a fresh one (it has no way to tell the difference, and doesn't
+        need to)."""
+        if node.kind == "tool_error":
+            return node.summary
+        return (
+            f"[{node.id}] {node.summary}\n"
+            f"(This is a summary. Call expand_node(node_id=\"{node.id}\") for the exact, "
+            f"full value if you need precision the summary doesn't give you.)"
+        )
+
+    def _mindgraph_tool_message(self, tool_name: str, result_text: str, error: Optional[str],
+                                 raw_value: Any, dedup_key: Optional[str] = None) -> str:
         """Summarizes one tool result into a MindGraph node and returns
         the short text that goes into `messages` in its place -- see the
         module docstring's "Token reduction" section. Records the
         raw-vs-summary token estimate into self.mindgraph_savings either
         way, including for an error result (a short error string usually
         doesn't need summarizing, but it's still measured for
-        consistency)."""
+        consistency). `result_text`/`error` are stashed in the node's
+        metadata so a later dedup-cache hit (see _run_tool_calling_loop)
+        can reconstruct a tool_call_log entry without re-invoking
+        anything."""
         if error is not None:
             # Errors are already short and actionable -- summarizing them
             # further would just lose the exact message the model needs to
@@ -636,20 +709,17 @@ class ModelAgent(Executable):
             full_ref = raw_value if raw_value is not None else result_text
             kind = "tool_result"
 
-        node = self.mindgraph.add_node(summary, kind=kind, full_ref=full_ref,
-                                        metadata={"tool": tool_name})
+        node = self.mindgraph.add_node(
+            summary, kind=kind, full_ref=full_ref, dedup_key=dedup_key,
+            metadata={"tool": tool_name, "result_text": result_text, "error": error},
+        )
         self.mindgraph_savings.append({
             "tool": tool_name,
             "raw_tokens": estimate_tokens(result_text),
             "summary_tokens": estimate_tokens(summary),
+            "reused": False,
         })
-        if error is not None:
-            return summary
-        return (
-            f"[{node.id}] {summary}\n"
-            f"(This is a summary. Call expand_node(node_id=\"{node.id}\") for the exact, "
-            f"full value if you need precision the summary doesn't give you.)"
-        )
+        return self._node_reference_text(node)
 
     def _build_expand_node_tool(self) -> Tool:
         """The escape hatch the model gets back for whatever precision a

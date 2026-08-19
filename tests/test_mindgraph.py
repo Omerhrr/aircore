@@ -87,6 +87,32 @@ def test_remove_drops_a_node():
     assert len(g) == 0
 
 
+def test_get_by_dedup_key_returns_none_when_unregistered():
+    g = MindGraph()
+    assert g.get_by_dedup_key("nope") is None
+
+
+def test_add_node_with_dedup_key_is_retrievable():
+    g = MindGraph()
+    node = g.add_node("fact", dedup_key="tool:x:{}")
+    assert g.get_by_dedup_key("tool:x:{}") is node
+
+
+def test_dedup_key_last_write_wins():
+    g = MindGraph()
+    first = g.add_node("first", dedup_key="k")
+    second = g.add_node("second", dedup_key="k")
+    assert g.get_by_dedup_key("k") is second
+    assert g.get_by_dedup_key("k") is not first
+
+
+def test_get_by_dedup_key_returns_none_after_node_removed():
+    g = MindGraph()
+    node = g.add_node("fact", dedup_key="k")
+    g.remove(node.id)
+    assert g.get_by_dedup_key("k") is None
+
+
 def test_all_nodes_returns_oldest_first():
     g = MindGraph()
     a = g.add_node("a")
