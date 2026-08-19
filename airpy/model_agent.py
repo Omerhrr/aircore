@@ -125,6 +125,32 @@ regardless of what was passed to __init__), and the developer's actual
 `idempotent`/`retries` values are repurposed to control retrying just the
 *model call* within a single turn, before any tool from that turn has
 run -- which is safe to retry, the same way a single-shot call is.
+
+Token reduction (ModelAgent(tools=[...], use_mindgraph=True)):
+
+MindGraph-M2. Without this, every tool result's full text gets appended
+to `messages` verbatim and resent on every subsequent turn -- a
+2,000-token tool result paid for once becomes a 2,000-token tax on every
+remaining turn of the loop (see aircore/mindgraph.py's module docstring
+for the full problem statement). With `use_mindgraph=True`, each tool
+result is summarized into an `aircore.mindgraph.Node` (deterministic,
+zero-extra-tokens for structured results via `default_summarize`, or a
+caller-supplied summarizer per tool name via `summarizers={tool_name:
+fn}`) before it becomes that turn's tool-role message content -- the
+model sees the short summary plus a node id, not the raw payload. An
+`expand_node` tool is auto-injected into the loop's own tool set so the
+model can still retrieve a specific node's exact, un-summarized value on
+demand, for the rare turn it actually needs precision the summary
+dropped. Nothing about this changes `tool_call_log` -- that still records
+the tool's real, full result text either way, exactly as before; only
+what gets sent back to the *model* shrinks. `self.mindgraph` (a fresh one
+per agent unless a shared one is passed in via `mindgraph=`, which is
+what lets M3's consensus specialists read from one graph instead of each
+paying full price for the same input) and `self.mindgraph_savings` (a
+per-call list of {tool, raw_tokens, summary_tokens} for measuring the
+actual reduction) are both available for inspection after execute()
+returns. False by default -- every ModelAgent built before this existed
+is completely unaffected.
 """
 
 from __future__ import annotations
@@ -136,6 +162,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Unio
 from aircore.agent import Agent as Identity
 from aircore.effects import Capability
 from aircore.executable import Executable
+from aircore.mindgraph import MindGraph, NodeNotFound, default_summarize, estimate_tokens
 from aircore.tools import Tool
 
 from .prompt_template import PromptTemplate
@@ -208,7 +235,10 @@ class ModelAgent(Executable):
                  output_schema: Optional[Any] = None,
                  memory: Optional[Any] = None,
                  conversation_id: Optional[str] = None,
-                 prompt_bindings: Optional[Dict[str, Any]] = None) -> None:
+                 prompt_bindings: Optional[Dict[str, Any]] = None,
+                 use_mindgraph: bool = False,
+                 mindgraph: Optional[MindGraph] = None,
+                 summarizers: Optional[Dict[str, Callable[[Any], str]]] = None) -> None:
         # Model calls default to idempotent=True (unlike Tool's
         # idempotent=False default) because a read-only generation call is
         # normally safe to retry on a transient failure -- but this is
@@ -282,6 +312,22 @@ class ModelAgent(Executable):
         self.identity = identity
         self.last_response: Optional[ModelResponse] = None
         self.tool_call_log: List[ToolCallRecord] = []
+
+        # See the module docstring's "Token reduction" section. `mindgraph`
+        # lets a caller pass in a graph shared across multiple ModelAgents
+        # (M3's consensus specialists reading one shared subgraph instead
+        # of each paying full price for the same input) -- if not given
+        # and use_mindgraph is True, each agent gets its own private graph.
+        # If use_mindgraph is False (the default), self.mindgraph is still
+        # created for API consistency (always inspectable), it's just never
+        # written to or read from by the loop.
+        self.use_mindgraph = use_mindgraph
+        self.mindgraph = mindgraph if mindgraph is not None else MindGraph()
+        self.summarizers = dict(summarizers or {})
+        # One entry per tool call made with use_mindgraph=True -- the
+        # measured proof that this actually reduces tokens, not just a
+        # claim. {"tool": name, "raw_tokens": int, "summary_tokens": int}.
+        self.mindgraph_savings: List[Dict[str, Any]] = []
 
         # See the module docstring's "Retry semantics change once `tools`
         # is set" section. `_loop_call_*` are always the developer's actual
@@ -473,7 +519,13 @@ class ModelAgent(Executable):
 
     def _run_tool_calling_loop(self) -> Any:
         tools_by_name = {t.name: t for t in self.tools}
-        schemas = [tool_to_schema(t) for t in self.tools]
+        # See the module docstring's "Token reduction" section --
+        # expand_node is only added to the model's actual tool set when
+        # use_mindgraph is on; a caller that never opts in sees exactly
+        # the tool set they passed in, unchanged.
+        if self.use_mindgraph:
+            tools_by_name.setdefault("expand_node", self._build_expand_node_tool())
+        schemas = [tool_to_schema(t) for t in tools_by_name.values()]
         # Resolved once, up front -- every turn of this loop reuses the
         # same resolved prompt text (a PromptTemplate is rendered exactly
         # once per execute() call, not once per turn; nothing about
@@ -485,6 +537,7 @@ class ModelAgent(Executable):
         history = self._load_history() if self.memory is not None else []
         messages: List[dict] = list(history) + [{"role": "user", "content": resolved_prompt}]
         self.tool_call_log = []
+        self.mindgraph_savings = []
 
         for _turn in range(self.max_turns):
             request = ModelRequest(prompt=resolved_prompt, messages=messages,
@@ -505,14 +558,21 @@ class ModelAgent(Executable):
             })
 
             for call in response.tool_calls:
-                result_text, error = self._invoke_tool(tools_by_name, call.name, call.arguments)
+                result_text, error, raw_value = self._invoke_tool(tools_by_name, call.name, call.arguments)
+                # tool_call_log always keeps the real, full result text --
+                # use_mindgraph only changes what gets sent back to the
+                # *model* below, never what's inspectable after the fact.
                 self.tool_call_log.append(ToolCallRecord(
                     name=call.name, arguments=call.arguments, result=result_text, error=error,
                 ))
+                if self.use_mindgraph and call.name != "expand_node":
+                    message_content = self._mindgraph_tool_message(call.name, result_text, error, raw_value)
+                else:
+                    message_content = result_text
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.id,
-                    "content": result_text,
+                    "content": message_content,
                 })
 
         raise ModelAgentToolLoopExceeded(
@@ -521,28 +581,96 @@ class ModelAgent(Executable):
         )
 
     def _invoke_tool(self, tools_by_name: Dict[str, Tool], name: str, arguments: Dict[str, Any]):
-        """Returns (result_text, error). Never raises -- a tool failure or
-        a capability denial becomes text fed back to the model (so it can
-        adapt, e.g. try different arguments or give up), not a crash of
-        the whole loop."""
+        """Returns (result_text, error, raw_value). Never raises -- a tool
+        failure or a capability denial becomes text fed back to the model
+        (so it can adapt, e.g. try different arguments or give up), not a
+        crash of the whole loop. raw_value is the tool's actual return
+        value before str()-ing it (None on error/missing-tool/capability-
+        denial) -- kept around only so use_mindgraph's summarizers can work
+        from real structured data (a list of candle dicts, a number) rather
+        than an already-flattened string; tool_call_log always uses
+        result_text regardless, so this is purely additive."""
         tool = tools_by_name.get(name)
         if tool is None:
             error = f"no such tool '{name}'"
-            return f"Error: {error}", error
+            return f"Error: {error}", error, None
 
         if self.identity is not None and tool.requires:
             missing = self.identity.missing(tool.requires)
             if missing:
                 names = ", ".join(c.name for c in missing)
                 error = f"identity '{self.identity.name}' lacks capability/capabilities [{names}]"
-                return f"Error: {error}", error
+                return f"Error: {error}", error, None
 
         try:
             result = tool(**arguments)
-            return str(result), None
+            return str(result), None, result
         except Exception as exc:  # noqa: BLE001 -- fed back to the model as text, not re-raised
             error = f"{type(exc).__name__}: {exc}"
-            return f"Error calling {name}: {error}", error
+            return f"Error calling {name}: {error}", error, None
+
+    def _mindgraph_tool_message(self, tool_name: str, result_text: str,
+                                 error: Optional[str], raw_value: Any) -> str:
+        """Summarizes one tool result into a MindGraph node and returns
+        the short text that goes into `messages` in its place -- see the
+        module docstring's "Token reduction" section. Records the
+        raw-vs-summary token estimate into self.mindgraph_savings either
+        way, including for an error result (a short error string usually
+        doesn't need summarizing, but it's still measured for
+        consistency)."""
+        if error is not None:
+            # Errors are already short and actionable -- summarizing them
+            # further would just lose the exact message the model needs to
+            # adapt. Still recorded as a node (kind="tool_error") so it's
+            # part of the graph's history and expand_node can retrieve it,
+            # but the "summary" IS the real error text, unchanged.
+            summary = result_text
+            full_ref = result_text
+            kind = "tool_error"
+        else:
+            source = raw_value if raw_value is not None else result_text
+            if tool_name in self.summarizers:
+                summary = self.summarizers[tool_name](source)
+            else:
+                summary = default_summarize(source, label=tool_name)
+            full_ref = raw_value if raw_value is not None else result_text
+            kind = "tool_result"
+
+        node = self.mindgraph.add_node(summary, kind=kind, full_ref=full_ref,
+                                        metadata={"tool": tool_name})
+        self.mindgraph_savings.append({
+            "tool": tool_name,
+            "raw_tokens": estimate_tokens(result_text),
+            "summary_tokens": estimate_tokens(summary),
+        })
+        if error is not None:
+            return summary
+        return (
+            f"[{node.id}] {summary}\n"
+            f"(This is a summary. Call expand_node(node_id=\"{node.id}\") for the exact, "
+            f"full value if you need precision the summary doesn't give you.)"
+        )
+
+    def _build_expand_node_tool(self) -> Tool:
+        """The escape hatch the model gets back for whatever precision a
+        MindGraph summary dropped -- see the module docstring. Built fresh
+        per loop (closes over self.mindgraph, which may be a shared graph
+        passed in via `mindgraph=`) rather than a module-level function,
+        same closure-over-current-state pattern TradingOS's
+        analysis_tools.py uses for its own runtime-built tools."""
+        mindgraph = self.mindgraph
+
+        def expand_node(node_id: str) -> str:
+            """Retrieve the full, non-summarized value behind a MindGraph node id (shown in brackets, e.g. [n3]) that appeared in an earlier tool result. Only use this if you need exact numbers or data beyond what the summary already gave you."""
+            try:
+                value = mindgraph.get_full(node_id)
+            except NodeNotFound:
+                return f"Error: no such node '{node_id}'"
+            if isinstance(value, (list, dict)):
+                return json.dumps(value, default=str)
+            return str(value)
+
+        return Tool(expand_node, name="expand_node")
 
     def usage(self) -> Optional[Dict[str, Any]]:
         """Implements Executable's generic usage() hook (see executable.py).

@@ -46,6 +46,15 @@ Tool-calling loop: ModelAgent(tools=[...]) lets a model actually call
     Scheduler entirely -- not journaled, not Policy-enforced; `identity=`
     is a partial capability-check mitigation, not a full fix).
 
+MindGraph-M2: ModelAgent(tools=[...], use_mindgraph=True) cuts the
+    dominant token cost of a long tool-calling loop -- every tool result
+    resent verbatim on every subsequent turn -- by summarizing each
+    result into an aircore.MindGraph node before it re-enters the
+    conversation, with an auto-injected `expand_node` tool as the
+    precision escape hatch. See aircore/mindgraph.py's module docstring
+    for the problem statement and model_agent.py's "Token reduction"
+    section for exactly what changes (nothing, by default).
+
 JudgeConsensus (judge_consensus.py): a consensus strategy for aircore's
     ConsensusGroup (see aircore/consensus.py) that uses a model call to judge
     agreement instead of exact-string matching -- suited to free-text
@@ -154,7 +163,7 @@ Facade (Agent, Workflow, Tool, tool): airpy is meant to be the whole
     doesn't know airpy exists.
 """
 
-from aircore import Tool, Workflow, tool
+from aircore import MindGraph, Tool, Workflow, tool
 
 from .ask import ask
 from .judge_consensus import JudgeConsensus, JudgeConsensusFailed
@@ -176,7 +185,7 @@ from .structured_output import StructuredOutputError
 Agent = ModelAgent
 
 __all__ = [
-    "Agent", "Workflow", "Tool", "tool",
+    "Agent", "Workflow", "Tool", "tool", "MindGraph",
     "ModelProvider", "ModelRequest", "ModelResponse", "Usage",
     "ToolSchema", "ToolCallRequest",
     "MockProvider", "LiteLLMProvider", "OpenAIProvider", "ModelAgent",
