@@ -216,6 +216,90 @@ class MindGraph:
         node" rather than a bounded neighborhood."""
         return sorted(self._nodes.values(), key=lambda n: n.seq)
 
+    def collapse(self, node_ids: Iterable[str], summary: str, kind: str = "collapsed",
+                 full_ref: Any = None, metadata: Optional[Dict[str, Any]] = None) -> Node:
+        """Folds several existing nodes into one new node and removes the
+        originals -- the actual mechanism M4 (long-run compaction) uses:
+        a graph that's been running for hours doesn't have to keep every
+        individual node forever, it can periodically replace a batch of
+        old ones with a single denser summary, keeping to_prompt_context's
+        token cost bounded by NODE COUNT staying bounded, not just by the
+        neighborhood-walk trick M1 already provides for a single render.
+
+        `summary` is the caller's job to compute (aircore has no opinion
+        on how N old nodes should be summarized into one -- see
+        compact_oldest() below for the common "just describe them as a
+        batch" case, or a caller can write its own summarizer, e.g.
+        TradingOS's AlwaysOnLoop aggregating cycle outcomes into
+        win/loss/action counts).
+
+        Any OTHER node that had an edge pointing at one of the collapsed
+        ids is automatically relinked to point at the new collapsed node
+        instead (deduplicated, so multiple collapsed dependencies don't
+        create multiple identical edges) -- this is what remove()'s own
+        docstring says is "expected to" happen, done here in one place so
+        every caller gets it for free instead of reimplementing the
+        relink themselves.
+
+        Raises NodeNotFound if any id in node_ids doesn't exist. Returns
+        the new collapsed node; its `edges` are empty (it doesn't depend
+        on the now-gone originals -- it stands in for the information
+        they carried, not for a dependency on them)."""
+        ids_to_collapse = list(node_ids)
+        for node_id in ids_to_collapse:
+            if node_id not in self._nodes:
+                raise NodeNotFound(f"collapse: unknown node id {node_id!r}")
+        collapsed_set = set(ids_to_collapse)
+
+        new_node = self.add_node(summary, kind=kind, full_ref=full_ref, metadata=metadata)
+
+        for node_id in ids_to_collapse:
+            self.remove(node_id)
+
+        for node in self._nodes.values():
+            if node.id == new_node.id:
+                continue
+            relinked = False
+            new_edges = []
+            seen = set()
+            for edge in node.edges:
+                target = new_node.id if edge in collapsed_set else edge
+                if target in seen:
+                    relinked = True  # a duplicate produced by the relink, drop it
+                    continue
+                seen.add(target)
+                new_edges.append(target)
+                if edge in collapsed_set:
+                    relinked = True
+            if relinked:
+                node.edges = new_edges
+
+        return new_node
+
+    def compact_oldest(self, n: int, summarize: Callable[[List[Node]], str],
+                        kind: str = "collapsed") -> Optional[Node]:
+        """The common case built on collapse(): take the `n` oldest nodes
+        (by seq -- all_nodes()'s order) and fold them into one, using
+        `summarize(nodes) -> str` to describe the batch. Returns None
+        (does nothing) if the graph has `n` or fewer nodes total -- there
+        would be nothing left to keep individually addressable, and a
+        caller looping "compact whenever len(graph) > threshold" every
+        cycle shouldn't have to separately guard against
+        over-compacting a small graph.
+
+        This is what a long-running caller (M4's actual use case --
+        TradingOS's AlwaysOnLoop calling this every cycle once the graph
+        passes some size) uses to keep node count bounded forever
+        regardless of how long the run goes on: call this once per
+        cycle/tick with the same `n`/threshold policy, and the graph's
+        size settles into a steady state instead of growing without
+        limit."""
+        if len(self._nodes) <= n or n <= 0:
+            return None
+        oldest = self.all_nodes()[:n]
+        summary = summarize(oldest)
+        return self.collapse([node.id for node in oldest], summary, kind=kind)
+
     def neighborhood(self, node_id: str, hops: int = 1) -> List[Node]:
         """Breadth-first walk outward from node_id along edges (both
         directions -- a node's dependencies AND anything that depends on

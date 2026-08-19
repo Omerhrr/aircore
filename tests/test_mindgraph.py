@@ -121,6 +121,98 @@ def test_all_nodes_returns_oldest_first():
     assert [n.id for n in g.all_nodes()] == [a.id, b.id, c.id]
 
 
+# --- compaction (M4) -------------------------------------------------------
+
+def test_collapse_merges_nodes_into_one_and_removes_originals():
+    g = MindGraph()
+    a = g.add_node("cycle 1: call, won")
+    b = g.add_node("cycle 2: put, lost")
+    c = g.add_node("cycle 3: none")
+
+    collapsed = g.collapse([a.id, b.id, c.id], "cycles 1-3: 1 call (won), 1 put (lost), 1 none")
+
+    assert a.id not in g and b.id not in g and c.id not in g
+    assert collapsed.id in g
+    assert len(g) == 1
+    assert "1 call" in collapsed.summary
+
+
+def test_collapse_relinks_dependents_of_collapsed_nodes():
+    g = MindGraph()
+    a = g.add_node("a")
+    b = g.add_node("b")
+    dependent = g.add_node("depends on both a and b", edges=[a.id, b.id])
+
+    collapsed = g.collapse([a.id, b.id], "a+b summary")
+
+    assert sorted(g.get(dependent.id).edges) == [collapsed.id]
+
+
+def test_collapse_unknown_node_raises():
+    g = MindGraph()
+    a = g.add_node("a")
+    with pytest.raises(NodeNotFound):
+        g.collapse([a.id, "ghost"], "summary")
+
+
+def test_collapse_returned_node_has_no_edges_of_its_own():
+    g = MindGraph()
+    a = g.add_node("a")
+    b = g.add_node("b", edges=[a.id])
+    collapsed = g.collapse([a.id, b.id], "summary")
+    assert collapsed.edges == []
+
+
+def test_compact_oldest_does_nothing_below_threshold():
+    g = MindGraph()
+    g.add_node("a")
+    g.add_node("b")
+    result = g.compact_oldest(5, summarize=lambda nodes: "should not be called")
+    assert result is None
+    assert len(g) == 2
+
+
+def test_compact_oldest_folds_the_oldest_n_nodes():
+    g = MindGraph()
+    for i in range(10):
+        g.add_node(f"cycle {i}")
+
+    def summarize(nodes):
+        return f"{len(nodes)} cycles summarized"
+
+    collapsed = g.compact_oldest(7, summarize=summarize)
+    assert collapsed is not None
+    assert collapsed.summary == "7 cycles summarized"
+    # 7 folded into 1, plus the 3 that were left alone
+    assert len(g) == 4
+
+
+def test_node_count_stays_bounded_across_an_unbounded_number_of_additions():
+    """The actual M4 property: repeatedly adding nodes AND periodically
+    compacting keeps the graph's total size settling into a steady state,
+    instead of growing forever the way a plain transcript would over a
+    long-running loop (e.g. TradingOS's AlwaysOnLoop running for days)."""
+    g = MindGraph()
+    threshold = 50
+    compact_batch = 30
+
+    for cycle in range(2000):
+        g.add_node(f"cycle {cycle} result")
+        if len(g) > threshold:
+            g.compact_oldest(compact_batch, summarize=lambda nodes: f"{len(nodes)} cycles compacted")
+
+    # settled well below the raw "one node per cycle" count (2000) --
+    # bounded by threshold/compact_batch, not by run length.
+    assert len(g) <= threshold + 1
+
+
+def test_compact_oldest_zero_n_is_a_noop():
+    g = MindGraph()
+    g.add_node("a")
+    assert g.compact_oldest(0, summarize=lambda nodes: "x") is None
+    assert len(g) == 1
+
+
 # --- neighborhood / bounded context ---------------------------------------
 
 def test_neighborhood_walks_dependencies_and_dependents():
