@@ -106,6 +106,22 @@ implement usage() -> Optional[dict], the scheduler emits UsageReported
 when it does, and Metrics.usage_totals sums whatever numeric keys show
 up. Closed since M8, proven again live in examples/
 production_readiness.py's real DeepSeek run.)
+
+MindGraph (mindgraph.py, M9): a compact, graph-shaped context memory --
+built to address a real cost problem, not a hypothetical one: both a
+ModelAgent tool-calling loop and a long-running Workflow tend to
+accumulate context linearly, resending every prior tool result verbatim
+on every subsequent call. MindGraph replaces "raw output in context"
+with a Node (a short, dense summary plus a full_ref pointer back to
+where the verbatim value still lives) and a bounded neighborhood
+renderer (`to_prompt_context(node_id, hops=N)`), so prompt size stays
+roughly constant as a run gets longer instead of growing with it. This
+module is the standalone data structure only -- no dependency on
+Scheduler/Workflow/ModelAgent; integration into airpy's tool-calling
+loop, into Workflow/consensus for shared context across parallel
+specialists, and into long-running loops for progressive compaction are
+separate, later milestones, each free to decide independently *when* to
+summarize and *what* counts as "nearby" for its own use case.
 """
 
 from .agent import Agent
@@ -121,6 +137,11 @@ from .executable import Executable, ToolTimeout
 from .graph import GraphNode, build_execution_graph, render_execution_graph
 from .journal import Journal
 from .memory import Memory, MemoryScope
+from .mindgraph import (
+    MindGraph, MindGraphError, Node, NodeNotFound,
+    estimate_tokens, default_summarize, summarize_number_series,
+    summarize_ohlc_candles, summarize_text,
+)
 from .observability import Metrics, ToolStats
 from .persistent_memory import FileMemoryScope
 from .policy import Policy, PolicyViolation
@@ -146,6 +167,9 @@ __all__ = [
     "ToolTimeout",
     "Sandbox", "SandboxViolation", "SandboxTimeout", "EgressDenied",
     "SandboxedToolError", "run_sandboxed",
+    "MindGraph", "MindGraphError", "Node", "NodeNotFound", "estimate_tokens",
+    "default_summarize", "summarize_number_series", "summarize_ohlc_candles",
+    "summarize_text",
 ]
 
 __version__ = "0.1.0"
