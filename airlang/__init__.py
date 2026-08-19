@@ -56,4 +56,4 @@ __all__ = [
     "AirLangBindingError", "AirLangNotYetSupportedError", "build_workflow", "execute_ir", "execute_file",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
