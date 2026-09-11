@@ -35,3 +35,12 @@ examples/production_readiness_checkpoint.json
 # from an environment variable (DEEPSEEK_API_KEY etc.), never a file, but
 # .env is excluded defensively in case that convention is ever used.
 .env
+
+# Internal planning/spec docs -- working notes for building this repo
+# and the downstream TradingOS project, not user-facing documentation.
+# Kept locally, not pushed to GitHub.
+tradingos-plan.md
+architecture-spec-v1.md
+airlang-spec-v1.md
+real-project-readiness-roadmap.md
+cross-step-data-flow.md
