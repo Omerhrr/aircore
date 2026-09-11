@@ -88,9 +88,10 @@ step involves an LLM at all.
 8. [AirLang: workflows as data](#airlang-workflows-as-data)
 9. [The ai CLI](#the-ai-cli)
 10. [What you can build with this](#what-you-can-build-with-this)
-11. [Design principles](#design-principles)
-12. [Examples and tests](#examples-and-tests)
-13. [FAQ](#faq)
+11. [Comparison with alternatives](#comparison-with-alternatives)
+12. [Design principles](#design-principles)
+13. [Examples and tests](#examples-and-tests)
+14. [FAQ](#faq)
 
 ---
 
@@ -844,6 +845,61 @@ human approval gate sits in front of any action taken on the result.
 just the scheduler, retries, journal, and policy engine for plain Python
 automation, and add `airpy` later if and when an LLM actually becomes part
 of the picture.
+
+---
+
+## Comparison with alternatives
+
+This isn't a claim of being strictly better than every framework below.
+Some of them have a much larger ecosystem, a bigger community, or stronger
+guarantees in one specific area (Temporal's durability, in particular, is
+hard to match with anything that isn't also a distributed system). The
+table below is about one specific thing: which of these guarantees are a
+built-in, shipped primitive you call directly, versus something you'd have
+to build yourself, get from a separate paid tier, or that isn't offered at
+all. Researched in September 2026, current at time of writing, and worth
+re-checking yourself since this space moves fast.
+
+| | **aircore** | LangGraph | CrewAI | Microsoft Agent Framework | OpenAI Agents SDK | Temporal | LlamaIndex Workflows |
+|---|---|---|---|---|---|---|---|
+| Deployment | Python library, no server | Python/JS library, no server (LangSmith adds an optional hosted layer) | Python library, no server (AMP is an optional paid hosted layer) | Python/.NET library, no server | Python/JS library, no server for the core; Sandbox Agents needs OpenAI-hosted compute | Requires running a Temporal server/cluster plus worker processes | Python/TS library, no server (llama-agents adds an optional hosted API layer) |
+| Built-in audit journal | Yes, `Journal` | Yes, via LangSmith tracing | Paid tier only (AMP); OSS core relies on external tools | Yes, telemetry/middleware pipeline | Yes, built-in Tracing | Yes, execution history is core to how it works | Not a dedicated product, relies on external tooling |
+| Tool permission model | Yes, `Capability`/`requires=`, checked before the call | Not built in, DIY | Not built in, requested but unshipped | Partial, via middleware and a separate governance toolkit | Partial, sandbox `run_as` scoping only | Cluster-level access control, not per-tool | Not built in |
+| Human approval gate | Yes, `Policy.approval_for` + `approval_callback` | Yes, `interrupt()` nodes | Yes, guardrails and AMP input points | Yes, first-class tool approval | Yes, human-in-the-loop plus guardrails | Not first-class, buildable on Signals/Updates | Yes, pause-and-resume on a human input event |
+| Crash-safe checkpoint and resume | Yes, `FileCheckpointStore` | Yes, checkpointer-backed | Not confirmed as crash-resume grade | Part of the graph workflow engine | Not confirmed | Yes, this is Temporal's core guarantee | Partial, requires deliberate snapshotting |
+| Sandboxed tool execution | Yes, `Sandbox`, a real subprocess | Optional separate package | Yes, via E2B/Daytona/Docker integrations | Yes, `ShellExecutor` (.NET) plus a governance toolkit | Yes, Sandbox Agents (OpenAI-hosted compute) | Not built in, left to your own Activities | Not built in, third-party sandbox integrations |
+| Fail-loud multi-agent consensus | Yes, `.consensus()` raises `ConsensusFailed` on disagreement | Not found as a shipped primitive | Not found as a shipped primitive | Not found as a shipped primitive | Not found (has delegation via handoffs, not voting) | Not applicable, general-purpose engine | Not found as a shipped primitive |
+| Long-loop context compaction | Yes, `MindGraph` | Not confirmed | Not confirmed | Yes, automatic context compaction | Not confirmed | Not LLM-context-specific (has large-payload storage) | Not confirmed, described as a DIY pattern |
+| Core dependencies | Zero, for `aircore` itself | Several (`langchain-core` and friends) | Several | Several | Several | A running Temporal cluster | Several |
+
+A few of these deserve more nuance than a table cell can hold:
+
+- **Checkpoint and resume isn't the same guarantee everywhere.** Temporal's
+  durable execution (mid-activity retries, exactly-once-style semantics,
+  built on an operated cluster) is a stronger guarantee than any
+  library-only checkpointer, including this one's. If you need that level
+  of durability and are willing to run and operate a Temporal cluster,
+  Temporal is the more mature choice for that specific guarantee.
+- **Fail-loud consensus** turned up as a shipped, named primitive in none
+  of the six alternatives researched for this table. Where similar ideas
+  exist (LangGraph/CrewAI's multi-agent patterns, AutoGen's historical
+  group-chat mode), they're a pattern you assemble yourself, not a
+  function you call that raises a specific exception on disagreement.
+- **LangGraph and CrewAI have far larger ecosystems** than this project:
+  more integrations, more community examples, more tutorials, and (for
+  CrewAI) a hosted platform with dashboards. If ecosystem size and
+  community support matter more to you than the specific guarantees in
+  this table, either is a reasonable choice.
+- **Microsoft Agent Framework's context compaction** is the one other
+  confirmed built-in answer to the same token-growth problem `MindGraph`
+  solves here, monitoring token usage and compacting history automatically
+  mid-loop. If you're already in the Microsoft/.NET or Azure ecosystem,
+  it's worth a direct look.
+- **If you don't need AI at all**, `aircore` by itself is a small,
+  dependency-free task scheduler with retries, a journal, and a policy
+  engine. Temporal is the heavier-weight, much more battle-tested choice
+  for that same class of problem if you're willing to operate a cluster
+  for it.
 
 ---
 
